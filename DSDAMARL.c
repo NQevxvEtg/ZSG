@@ -7,103 +7,92 @@ strategy('Dynamic Supply & Demand Adaptive Moving Averages with Regime Logic', '
 
 
 // === Inputs ===
-
-// Moving Average Settings
-fastMaLength = input.int(12, title="Base Fast MA Length", minval=1)
-slowMaLength = input.int(26, title="Base Slow MA Length", minval=1)
-
-// Faith Index Settings
-trust_length = input.int(288, title="Faith Trust Length (Periods)")
-resilience_threshold = input.float(2.0, title="Resilience Threshold")
-content_zone_multiplier = input.float(1.0, title="Content Zone Multiplier")
-purpose_weight = input.float(1.0, title="Purpose Alignment Weight")
-correlation_length = input.int(288, title="Correlation Length (Periods)")
-
-// Regime Detection Settings
+fastMaLength = input.int(12, title="Fast MA Length", minval=1)
+slowMaLength = input.int(26, title="Slow MA Length", minval=1)
 trendThresholdStrong = input.float(35.0, title="Strong Trend Threshold (ADX)")
 trendThresholdWeak = input.float(15.0, title="Weak Trend Threshold (ADX)")
 regimeSwitchLength = input.int(14, title="Regime Detection Length")
+faithTrustLength = input.int(288, title="Faith Trust Length (Periods)")
 
-// OBV Settings
-obvMaLength = input.int(14, title="OBV MA Length")
+// === Core Functions ===
 
-// === Core Calculations ===
+// Regime Logic
+f_regime_logic(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength) =>
+    TrueRange = ta.tr(true)
+    DirectionalMovementPlus = high - high[1] > low[1] - low ? math.max(high - high[1], 0) : 0
+    DirectionalMovementMinus = low[1] - low > high - high[1] ? math.max(low[1] - low, 0) : 0
+    SmoothedTrueRange = ta.rma(TrueRange, regimeSwitchLength)
+    SmoothedDirectionalMovementPlus = ta.rma(DirectionalMovementPlus, regimeSwitchLength)
+    SmoothedDirectionalMovementMinus = ta.rma(DirectionalMovementMinus, regimeSwitchLength)
+    DIPlus = SmoothedTrueRange != 0 ? SmoothedDirectionalMovementPlus / SmoothedTrueRange * 100 : 0
+    DIMinus = SmoothedTrueRange != 0 ? SmoothedDirectionalMovementMinus / SmoothedTrueRange * 100 : 0
+    sumDI = DIPlus + DIMinus
+    dx = sumDI != 0 ? math.abs(DIPlus - DIMinus) / sumDI * 100 : 0
+    ADX = ta.rma(dx, regimeSwitchLength)
+    ADX > trendThresholdStrong ? "Strong Trend" : ADX > trendThresholdWeak ? "Weak Trend" : "No Trend"
 
 // Faith Index
-sma_value = ta.sma(close, trust_length)
-volatility = ta.stdev(close, trust_length)
-trust_score = 1 - (volatility / sma_value)
+f_faith_index(trustLength) =>
+    smaValue = ta.sma(close, trustLength)
+    volatility = ta.stdev(close, trustLength)
+    resilienceScore = 1 - (volatility / smaValue)
+    contentZone = math.abs(close - smaValue) / (2 * volatility)
+    trustScore = 1 - math.min(contentZone, 1)
+    (resilienceScore + trustScore) / 2
 
-deviation = math.abs(close - sma_value)
-is_outlier = deviation > (resilience_threshold * volatility)
-resilience_score = 1 - math.sum(is_outlier ? 1 : 0, trust_length) / trust_length
+// Regime-Specific Moving Averages
 
-upper_zone = sma_value + (content_zone_multiplier * volatility)
-lower_zone = sma_value - (content_zone_multiplier * volatility)
-content_score = 1 - math.max(0, math.abs(close - sma_value) / (upper_zone - lower_zone))
+// Trending Market (EMA)
+f_trending_ma(length) =>
+    ta.ema(close, length)
 
-purpose_score = purpose_weight * ta.correlation(close, sma_value, correlation_length)
+// Ranging Market (SMA)
+f_ranging_ma(length) =>
+    ta.sma(close, length)
 
-faith_index = (trust_score + resilience_score + content_score + purpose_score) / 4
+// Volatile Market (VWMA)
+f_volatile_ma(length) =>
+    ta.vwma(close, length)
 
-// Regime Detection
-TrueRange = ta.tr(true)
-DirectionalMovementPlus = high - high[1] > low[1] - low ? math.max(high - high[1], 0) : 0
-DirectionalMovementMinus = low[1] - low > high - high[1] ? math.max(low[1] - low, 0) : 0
+// Controller Logic
+f_brain(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, fastLength, slowLength) =>
+    // Regime determination
+    regime = f_regime_logic(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength)
+    faithIndex = f_faith_index(faithTrustLength)
 
-SmoothedTrueRange = ta.rma(TrueRange, regimeSwitchLength)
-SmoothedDirectionalMovementPlus = ta.rma(DirectionalMovementPlus, regimeSwitchLength)
-SmoothedDirectionalMovementMinus = ta.rma(DirectionalMovementMinus, regimeSwitchLength)
+    // Initialize outputs
+    float fastMA = na
+    float slowMA = na
 
-DIPlus = SmoothedTrueRange != 0 ? SmoothedDirectionalMovementPlus / SmoothedTrueRange * 100 : 0
-DIMinus = SmoothedTrueRange != 0 ? SmoothedDirectionalMovementMinus / SmoothedTrueRange * 100 : 0
+    // Regime-Specific Moving Averages
+    if regime == "Strong Trend"
+        fastMA := f_trending_ma(fastLength)
+        slowMA := f_trending_ma(slowLength)
+    else if regime == "Weak Trend"
+        fastMA := f_ranging_ma(fastLength)
+        slowMA := f_ranging_ma(slowLength)
+    else  // No Trend (Volatile Market)
+        fastMA := f_volatile_ma(fastLength)
+        slowMA := f_volatile_ma(slowLength)
 
-sumDI = DIPlus + DIMinus
-dx = sumDI != 0 ? math.abs(DIPlus - DIMinus) / sumDI * 100 : 0
-ADX = ta.rma(dx, regimeSwitchLength)
+    // Return the dynamic MAs
+    [fastMA, slowMA]
 
-// Regime Logic Hierarchy
-regime = ADX > trendThresholdStrong ? "Strong Trend" : ADX > trendThresholdWeak ? "Weak Trend" : "No Trend"
+// === Execution ===
 
-// OBV
-obv = ta.cum(ta.change(close) > 0 ? volume : ta.change(close) < 0 ? -volume : 0)
-obvSignal = ta.sma(obv, obvMaLength)
-
-// === Adaptive EMA Calculations ===
-
-// Base smoothing factors
-baseFastAlpha = 2 / (fastMaLength + 1)
-baseSlowAlpha = 2 / (slowMaLength + 1)
-
-// Gradient Adjustment
-trendStrength = regime == "Strong Trend" ? 1 : regime == "Weak Trend" ? 0.5 : 0.2
-fastAlpha = baseFastAlpha * (1 + faith_index * trendStrength)
-slowAlpha = baseSlowAlpha * (1 - faith_index * trendStrength)
-
-// Clamp alpha values
-fastAlpha := math.min(math.max(fastAlpha, 0.01), 1)
-slowAlpha := math.min(math.max(slowAlpha, 0.01), 1)
-
-// Manually compute adaptive EMAs
-var float fastMA = na
-var float slowMA = na
-
-fastMA := na(fastMA[1]) ? close : fastAlpha * close + (1 - fastAlpha) * fastMA[1]
-slowMA := na(slowMA[1]) ? close : slowAlpha * close + (1 - slowAlpha) * slowMA[1]
+// Compute moving averages dynamically
+[fastDynamicMA, slowDynamicMA] = f_brain(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, fastMaLength, slowMaLength)
 
 // === Plotting ===
+plot(fastDynamicMA, title="Fast Dynamic MA", color=color.green, linewidth=2)
+plot(slowDynamicMA, title="Slow Dynamic MA", color=color.red, linewidth=2)
 
-plot(fastMA, title="Fast Adaptive MA", color=color.green, linewidth=2)
-plot(slowMA, title="Slow Adaptive MA", color=color.red, linewidth=2)
+// Fill between MAs
+fill(plot1=plot(fastDynamicMA, display=display.none), plot2=plot(slowDynamicMA, display=display.none),color=fastDynamicMA > slowDynamicMA ? color.new(color.green, 80) : color.new(color.red, 80), title="MA Fill")
 
-fill(plot1=plot(fastMA, display=display.none), plot2=plot(slowMA, display=display.none), color=fastMA > slowMA ? color.new(color.green, 80) : color.new(color.red, 80), title="MA Fill")
-
-bullishCross = ta.crossover(fastMA, slowMA)
-bearishCross = ta.crossunder(fastMA, slowMA)
-
-plotshape(bullishCross, title="Bullish Crossover", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.tiny)
-plotshape(bearishCross, title="Bearish Crossover", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.tiny)
-
+// Signals based on MA crossovers
+bullishCross = ta.crossover(fastDynamicMA, slowDynamicMA)
+bearishCross = ta.crossunder(fastDynamicMA, slowDynamicMA)
 
 // Indicator ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // Long Enrty/Exit
