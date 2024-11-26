@@ -42,7 +42,7 @@ upper_zone = sma_value + (content_zone_multiplier * volatility)
 lower_zone = sma_value - (content_zone_multiplier * volatility)
 content_score = 1 - math.max(0, math.abs(close - sma_value) / (upper_zone - lower_zone))
 
-purpose_score = purpose_weight * ta.correlation(close, ta.sma(close, trust_length), correlation_length)
+purpose_score = purpose_weight * ta.correlation(close, sma_value, correlation_length)
 
 faith_index = (trust_score + resilience_score + content_score + purpose_score) / 4
 
@@ -69,27 +69,18 @@ regime = ADX > trendThresholdStrong ? "Strong Trend" : ADX > trendThresholdWeak 
 obv = ta.cum(ta.change(close) > 0 ? volume : ta.change(close) < 0 ? -volume : 0)
 obvSignal = ta.sma(obv, obvMaLength)
 
-// === Adaptive EMA Calculations Managed by Regime Logic ===
+// === Adaptive EMA Calculations ===
 
 // Base smoothing factors
 baseFastAlpha = 2 / (fastMaLength + 1)
 baseSlowAlpha = 2 / (slowMaLength + 1)
 
-// Adjust smoothing factors based on Regime and Faith Index
-float fastAlpha = baseFastAlpha
-float slowAlpha = baseSlowAlpha
+// Gradient Adjustment
+trendStrength = regime == "Strong Trend" ? 1 : regime == "Weak Trend" ? 0.5 : 0.2
+fastAlpha = baseFastAlpha * (1 + faith_index * trendStrength)
+slowAlpha = baseSlowAlpha * (1 - faith_index * trendStrength)
 
-if regime == "Strong Trend"
-    fastAlpha := baseFastAlpha * (1 + faith_index)
-    slowAlpha := baseSlowAlpha * (1 - faith_index)
-else if regime == "Weak Trend"
-    fastAlpha := baseFastAlpha * (1 + faith_index * 0.5)
-    slowAlpha := baseSlowAlpha * (1 - faith_index * 0.5)
-else  // No Trend
-    fastAlpha := baseFastAlpha * (1 - faith_index * 0.5)
-    slowAlpha := baseSlowAlpha * (1 + faith_index * 0.5)
-
-// Ensure alphas are between 0 and 1
+// Clamp alpha values
 fastAlpha := math.min(math.max(fastAlpha, 0.01), 1)
 slowAlpha := math.min(math.max(slowAlpha, 0.01), 1)
 
@@ -105,14 +96,11 @@ slowMA := na(slowMA[1]) ? close : slowAlpha * close + (1 - slowAlpha) * slowMA[1
 plot(fastMA, title="Fast Adaptive MA", color=color.green, linewidth=2)
 plot(slowMA, title="Slow Adaptive MA", color=color.red, linewidth=2)
 
-// Fill between MAs to indicate trend direction
 fill(plot1=plot(fastMA, display=display.none), plot2=plot(slowMA, display=display.none), color=fastMA > slowMA ? color.new(color.green, 80) : color.new(color.red, 80), title="MA Fill")
 
-// Signals based on MA crossovers
 bullishCross = ta.crossover(fastMA, slowMA)
 bearishCross = ta.crossunder(fastMA, slowMA)
 
-// Plot signals
 plotshape(bullishCross, title="Bullish Crossover", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.tiny)
 plotshape(bearishCross, title="Bearish Crossover", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.tiny)
 
