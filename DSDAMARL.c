@@ -5,31 +5,90 @@ strategy('Dynamic Supply & Demand Adaptive Moving Averages with Regime Logic', '
 
 // Start code here :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-
 // === Inputs ===
 fastMaLength = input.int(12, title="Fast MA Length", minval=1)
 slowMaLength = input.int(26, title="Slow MA Length", minval=1)
 trendThresholdStrong = input.float(35.0, title="Strong Trend Threshold (ADX)")
 trendThresholdWeak = input.float(15.0, title="Weak Trend Threshold (ADX)")
 regimeSwitchLength = input.int(14, title="Regime Detection Length")
+atrLength = input.int(14, title="ATR Length for Volatility")
+flatMarketMultiplier = input.float(5.0, title="Flat Market ATR Multiplier")
+volatilitySpikeMultiplier = input.float(2.5, title="Volatility Spike Multiplier")
+distanceThreshold = input.float(0.05, title="Distance Filter Threshold (5%)")
 faithTrustLength = input.int(288, title="Faith Trust Length (Periods)")
 
 // === Core Functions ===
+f_compute_dx(regimeSwitchLength) =>
+    // Calculate True Range
+    trueRange = ta.tr(true)
 
-// Regime Logic
-f_regime_logic(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength) =>
-    TrueRange = ta.tr(true)
-    DirectionalMovementPlus = high - high[1] > low[1] - low ? math.max(high - high[1], 0) : 0
-    DirectionalMovementMinus = low[1] - low > high - high[1] ? math.max(low[1] - low, 0) : 0
-    SmoothedTrueRange = ta.rma(TrueRange, regimeSwitchLength)
-    SmoothedDirectionalMovementPlus = ta.rma(DirectionalMovementPlus, regimeSwitchLength)
-    SmoothedDirectionalMovementMinus = ta.rma(DirectionalMovementMinus, regimeSwitchLength)
-    DIPlus = SmoothedTrueRange != 0 ? SmoothedDirectionalMovementPlus / SmoothedTrueRange * 100 : 0
-    DIMinus = SmoothedTrueRange != 0 ? SmoothedDirectionalMovementMinus / SmoothedTrueRange * 100 : 0
+    // Calculate Directional Movement
+    plusDM = high - high[1] > low[1] - low ? math.max(high - high[1], 0) : 0
+    minusDM = low[1] - low > high - high[1] ? math.max(low[1] - low, 0) : 0
+
+    // Smooth values
+    smoothedTR = ta.rma(trueRange, regimeSwitchLength)
+    smoothedPlusDM = ta.rma(plusDM, regimeSwitchLength)
+    smoothedMinusDM = ta.rma(minusDM, regimeSwitchLength)
+
+    // Calculate DI+ and DI-
+    DIPlus = smoothedTR != 0 ? (smoothedPlusDM / smoothedTR) * 100 : 0
+    DIMinus = smoothedTR != 0 ? (smoothedMinusDM / smoothedTR) * 100 : 0
+
+    // Calculate DX
     sumDI = DIPlus + DIMinus
-    dx = sumDI != 0 ? math.abs(DIPlus - DIMinus) / sumDI * 100 : 0
-    ADX = ta.rma(dx, regimeSwitchLength)
-    ADX > trendThresholdStrong ? "Strong Trend" : ADX > trendThresholdWeak ? "Weak Trend" : "No Trend"
+    DX = sumDI != 0 ? (math.abs(DIPlus - DIMinus) / sumDI) * 100 : 0
+
+    DX
+
+
+// Improved Regime Logic
+f_regime_logic(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, atrLength, volatilitySpikeMultiplier, flatMarketMultiplier) =>
+    DX = f_compute_dx(regimeSwitchLength)
+    ADX = ta.rma(DX, regimeSwitchLength)
+    atr = ta.atr(atrLength)
+    avgVolatility = ta.sma(atr, atrLength)
+    sma200 = ta.sma(close, 200)
+
+    // Dynamic thresholds
+    volatilitySpikeThreshold = avgVolatility * volatilitySpikeMultiplier
+    lowVolatilityThreshold = avgVolatility / flatMarketMultiplier
+
+    // Define volatility and trend metrics
+    highVolatility = atr > volatilitySpikeThreshold
+    lowVolatility = atr < lowVolatilityThreshold
+
+    // Define market conditions
+    strongTrend = ADX > trendThresholdStrong
+    weakTrend = ADX > trendThresholdWeak and ADX <= trendThresholdStrong
+    noTrend = ADX <= trendThresholdWeak
+
+    aboveSMA200 = close > sma200
+    belowSMA200 = close < sma200
+
+    // Assign regime based on priority
+    var string regime = "Undefined"
+    if highVolatility and aboveSMA200 and strongTrend
+        regime := "Strong Uptrend"
+    else if highVolatility and belowSMA200 and strongTrend
+        regime := "Strong Downtrend"
+    else if highVolatility and noTrend
+        regime := "High Volatility (Choppy)"
+    else if lowVolatility and noTrend
+        regime := "Flat Market"
+    else if noTrend
+        regime := "Choppy Market"
+    else if weakTrend
+        regime := "Weak Trend"
+    else if highVolatility and close > ta.highest(close, atrLength)
+        regime := "Parabolic Spike"
+
+    regime
+
+
+
+
+
 
 // Faith Index
 f_faith_index(trustLength) =>
@@ -40,48 +99,94 @@ f_faith_index(trustLength) =>
     trustScore = 1 - math.min(contentZone, 1)
     (resilienceScore + trustScore) / 2
 
-// Regime-Specific Moving Averages
 
-// Trending Market (EMA)
+// Distance Filter
+f_distance_filter(price, ma, threshold) =>
+    math.abs(price - ma) / ma < threshold
+
+
+// Regime-Specific Moving Averages
 f_trending_ma(length) =>
     ta.ema(close, length)
 
-// Ranging Market (SMA)
 f_ranging_ma(length) =>
     ta.sma(close, length)
 
-// Volatile Market (VWMA)
 f_volatile_ma(length) =>
     ta.vwma(close, length)
 
+
 // Controller Logic
-f_brain(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, fastLength, slowLength) =>
+f_brain(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, fastLength, slowLength, atrLength, flatMarketMultiplier, volatilitySpikeMultiplier, distanceThreshold) =>
     // Regime determination
-    regime = f_regime_logic(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength)
-    faithIndex = f_faith_index(faithTrustLength)
+    regime = f_regime_logic(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, atrLength, volatilitySpikeMultiplier, flatMarketMultiplier)
+    var float fastMA = na
+    var float slowMA = na
 
-    // Initialize outputs
-    float fastMA = na
-    float slowMA = na
+    // Common indicators
+    tightTrend = ta.ema(close, fastLength)  // A tight EMA that hugs the price
+    atr = ta.atr(atrLength)
 
-    // Regime-Specific Moving Averages
-    if regime == "Strong Trend"
+    // Regime-Specific Logic
+    if regime == "Strong Uptrend" or regime == "Weak Trend"
+        // Use trend-following MAs
         fastMA := f_trending_ma(fastLength)
         slowMA := f_trending_ma(slowLength)
-    else if regime == "Weak Trend"
+
+    else if regime == "Strong Downtrend"
+        // Trend-following MAs for downtrends
+        fastMA := f_trending_ma(fastLength)
+        slowMA := f_trending_ma(slowLength)
+
+    else if regime == "Persistent Downtrend"
+        // Avoid trades if price is far below long-term SMA
+        sma200 = ta.sma(close, 200)
+        if close < sma200 * 0.95
+            fastMA := na
+            slowMA := na
+        else
+            fastMA := f_trending_ma(fastLength * 2)
+            slowMA := f_trending_ma(slowLength * 2)
+
+    else if regime == "Mean-Reverting High Volatility"
+        // Use a tight trend that hugs the price
+        fastMA := tightTrend
+        slowMA := tightTrend
+        if not f_distance_filter(close, tightTrend, distanceThreshold)  // Ignore trades too close to the trend
+            fastMA := na
+            slowMA := na
+
+    else if regime == "Choppy High Volatility"
+        // Use shorter-term volatility-adjusted MAs
+        fastMA := ta.vwma(close, fastLength)
+        slowMA := ta.vwma(close, slowLength)
+
+    else if regime == "Flat Market" or regime == "Choppy Market"
+        // Use ranging MAs for low-volatility conditions
         fastMA := f_ranging_ma(fastLength)
         slowMA := f_ranging_ma(slowLength)
-    else  // No Trend (Volatile Market)
-        fastMA := f_volatile_ma(fastLength)
-        slowMA := f_volatile_ma(slowLength)
 
-    // Return the dynamic MAs
+    else if regime == "Parabolic Spike"
+        // Avoid trades during parabolic spikes
+        fastMA := na
+        slowMA := na
+
+    // Apply distance filter for all other regimes
+    if regime != "Mean-Reverting High Volatility" and not f_distance_filter(close, fastMA, distanceThreshold)
+        fastMA := na
+        slowMA := na
+
     [fastMA, slowMA]
 
-// === Execution ===
 
-// Compute moving averages dynamically
-[fastDynamicMA, slowDynamicMA] = f_brain(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, fastMaLength, slowMaLength)
+
+
+
+
+
+
+// === Execution ===
+[fastDynamicMA, slowDynamicMA] = f_brain(trendThresholdStrong, trendThresholdWeak, regimeSwitchLength, fastMaLength, slowMaLength, atrLength, flatMarketMultiplier, volatilitySpikeMultiplier, distanceThreshold)
 
 // === Plotting ===
 plot(fastDynamicMA, title="Fast Dynamic MA", color=color.green, linewidth=2)
@@ -93,6 +198,8 @@ fill(plot1=plot(fastDynamicMA, display=display.none), plot2=plot(slowDynamicMA, 
 // Signals based on MA crossovers
 bullishCross = ta.crossover(fastDynamicMA, slowDynamicMA)
 bearishCross = ta.crossunder(fastDynamicMA, slowDynamicMA)
+
+
 
 // Indicator ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // Long Enrty/Exit
